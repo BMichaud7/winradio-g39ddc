@@ -1,0 +1,20 @@
+--- /tmp/orig-extract/g39ddc-1.11/driver/g39ddc.h	2018-06-06 07:24:59.000000000 -0400
++++ /home/brendan/winradio_devpack/g39ddc-1.11/driver/g39ddc.h	2026-06-20 15:54:22.284364526 -0400
+@@ -14,7 +14,7 @@
+ #endif
+ 
+ #define __G39_USB__
+-#define __G39_PCI__
++// #define __G39_PCI__  // disabled: this device is USB-only, vendor source for PCIe variant has bitrotted kernel APIs we dont need to port
+ //#define __G39_DEBUG__
+ 
+ #include <linux/version.h>
+@@ -181,7 +181,7 @@
+     uint32_t                        index;
+     struct g39_state                state;
+     struct g39_mutex                mutex;
+-    struct timespec                 last_power_off_time;
++    struct timespec64               last_power_off_time;
+     uint8_t                         dac;
+ 
+     struct device                   *p_dev;
