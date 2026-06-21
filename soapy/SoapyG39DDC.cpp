@@ -60,6 +60,7 @@ struct G39ChannelState
     uint32_t  sample_rate = 0;
     uint32_t  bandwidth   = 0;
     double    frequency_hz = 100e6;
+    bool      frequency_valid = false; // has setFrequency ever been called on this channel?
     uint8_t   attenuator_step = 0; // 0..3 -> 0/6/12/18 dB
 
     std::mutex                          mtx;
@@ -98,6 +99,8 @@ public:
         numChannels_  = info.ChannelCount;
         freqMinHz_    = static_cast<double>(info.FrontEndMinFrequency);
         freqMaxHz_    = static_cast<double>(info.FrontEndMaxFrequency);
+        frontEndWindowHz_ = static_cast<double>(info.FrontEndWindowWidth);
+        frontEndStepHz_   = static_cast<double>(info.FrontEndFrequencyStep);
 
         if (!SetPower_(hDevice_, 1))
         {
@@ -163,15 +166,85 @@ public:
     }
 
     // ---- frequency ---------------------------------------------------------
+    //
+    // The G39DDC has ONE shared analog front-end downconverter across both
+    // RX channels (FrontEndWindowWidth ~16 MHz, FrontEndFrequencyStep
+    // 10 MHz on the unit this was tested against -- read from
+    // GetDeviceInfo). The vendor's convenience SetFrequency(channel, freq)
+    // call repositions this shared front-end on every call, so naively
+    // calling it per-channel lets whichever channel retunes LAST silently
+    // "steal" the shared front-end out from under the other channel, even
+    // though that channel's own SetFrequency call still reports success.
+    // Confirmed on real hardware: a two-channel different-frequency test
+    // showed channel 0 never receiving correctly once channel 1 retuned
+    // afterward, for frequencies that were actually well within a single
+    // front-end window.
+    //
+    // Fix: track the front-end's actual position ourselves and only move
+    // it via SetFrontEndFrequency when a requested frequency genuinely
+    // doesn't fit the current window. Within the window, tune via the
+    // per-channel SetDDC1Frequency offset instead, which doesn't disturb
+    // the other channel at all. Confirmed empirically (calibrate_ddc1freq.c
+    // in the devpack examples dir): actual_freq = front_end_hz + ddc1_offset,
+    // with SetDDC1Frequency's offset being a plain signed Hz value.
+    //
+    // If the two channels' desired frequencies are farther apart than the
+    // window width, only one can be served correctly at a time -- that's a
+    // genuine hardware limit, not something software can work around; we
+    // reposition the front end on the requesting channel and leave the
+    // other channel degraded (logged), same as the vendor API would.
     void setFrequency(const int direction, const size_t channel,
                        const double frequency, const SoapySDR::Kwargs &) override
     {
         if (direction != SOAPY_SDR_RX) return;
         checkChannel(channel);
-        if (!SetFrequency_(hDevice_, static_cast<uint32_t>(channel),
-                            static_cast<uint64_t>(frequency)))
-            throw std::runtime_error("G39DDC SetFrequency failed");
+
+        std::lock_guard<std::mutex> felk(frontEndMtx_);
+
+        bool need_reposition = !frontEndValid_ ||
+            frequency < frontEndHz_ - frontEndWindowHz_ / 2.0 ||
+            frequency > frontEndHz_ + frontEndWindowHz_ / 2.0;
+
+        if (need_reposition)
+        {
+            double candidate = std::round(frequency / frontEndStepHz_) * frontEndStepHz_;
+            if (!SetFrontEndFrequency_(hDevice_, static_cast<uint64_t>(candidate)))
+                throw std::runtime_error("G39DDC SetFrontEndFrequency failed");
+
+            uint64_t actual = 0;
+            if (GetFrontEndFrequency_(hDevice_, &actual))
+                frontEndHz_ = static_cast<double>(actual);
+            else
+                frontEndHz_ = candidate; // readback unsupported -- trust our candidate
+            frontEndValid_ = true;
+
+            // Moving the front end shifts EVERY channel's effective RF
+            // position, since DDC1 offsets are relative to it. Reapply
+            // every other already-tuned channel's offset so this retune
+            // doesn't silently break them.
+            for (uint32_t ch = 0; ch < numChannels_; ch++)
+            {
+                if (ch == channel || !channels_[ch]->frequency_valid) continue;
+                double other_target = channels_[ch]->frequency_hz;
+                double other_offset = other_target - frontEndHz_;
+                if (std::abs(other_offset) > frontEndWindowHz_ / 2.0)
+                    SoapySDR_logf(SOAPY_SDR_WARNING,
+                        "G39DDC: channel %u's frequency %.0f Hz no longer fits the "
+                        "front-end window (now centered %.0f Hz, width %.0f Hz) -- "
+                        "that channel's reception will be degraded until retuned",
+                        ch, other_target, frontEndHz_, frontEndWindowHz_);
+                SetDDC1Frequency_(hDevice_, ch, static_cast<int32_t>(other_offset));
+            }
+        }
+
+        double offset = frequency - frontEndHz_;
+        if (!SetDDC1Frequency_(hDevice_, static_cast<uint32_t>(channel),
+                                static_cast<int32_t>(offset)))
+            throw std::runtime_error("G39DDC SetDDC1Frequency failed");
+
         channels_[channel]->frequency_hz = frequency;
+        channels_[channel]->frequency_valid = true;
+
         // Retuning doesn't stop the stream, so the vendor callback keeps
         // pushing into the ring buffer the whole time the retune is in
         // flight -- without clearing it here, readStream() can keep
@@ -190,11 +263,20 @@ public:
 
     double getFrequency(const int direction, const size_t channel) const override
     {
+        // GetFrequency_ is the vendor convenience getter paired with the
+        // convenience SetFrequency call we no longer use for tuning (see
+        // setFrequency) -- it doesn't reflect SetDDC1Frequency-based
+        // retunes, so compute from our own tracked front-end + DDC1 offset
+        // instead, reading the offset back from hardware for ground truth.
         if (direction != SOAPY_SDR_RX) return 0.0;
         checkChannel(channel);
-        uint64_t freq = 0;
-        if (GetFrequency_(hDevice_, static_cast<uint32_t>(channel), &freq))
-            return static_cast<double>(freq);
+        std::lock_guard<std::mutex> felk(frontEndMtx_);
+        if (frontEndValid_)
+        {
+            int32_t off = 0;
+            if (GetDDC1Frequency_(hDevice_, static_cast<uint32_t>(channel), &off))
+                return frontEndHz_ + static_cast<double>(off);
+        }
         return channels_[channel]->frequency_hz;
     }
 
@@ -509,6 +591,10 @@ private:
         SetPower_       = reinterpret_cast<G39DDC_SET_POWER>(dlsym(api_, "SetPower"));
         SetFrequency_   = reinterpret_cast<G39DDC_SET_FREQUENCY>(dlsym(api_, "SetFrequency"));
         GetFrequency_   = reinterpret_cast<G39DDC_GET_FREQUENCY>(dlsym(api_, "GetFrequency"));
+        SetFrontEndFrequency_ = reinterpret_cast<G39DDC_SET_FRONT_END_FREQUENCY>(dlsym(api_, "SetFrontEndFrequency"));
+        GetFrontEndFrequency_ = reinterpret_cast<G39DDC_GET_FRONT_END_FREQUENCY>(dlsym(api_, "GetFrontEndFrequency"));
+        SetDDC1Frequency_ = reinterpret_cast<G39DDC_SET_DDC1_FREQUENCY>(dlsym(api_, "SetDDC1Frequency"));
+        GetDDC1Frequency_ = reinterpret_cast<G39DDC_GET_DDC1_FREQUENCY>(dlsym(api_, "GetDDC1Frequency"));
         GetDDC1Count_   = reinterpret_cast<G39DDC_GET_DDC1_COUNT>(dlsym(api_, "GetDDC1Count"));
         GetDDCInfo_     = reinterpret_cast<G39DDC_GET_DDC_INFO>(dlsym(api_, "GetDDCInfo"));
         SetDDC1_        = reinterpret_cast<G39DDC_SET_DDC1>(dlsym(api_, "SetDDC1"));
@@ -518,7 +604,10 @@ private:
         SetAttenuator_  = reinterpret_cast<G39DDC_SET_ATTENUATOR>(dlsym(api_, "SetAttenuator"));
 
         if (!OpenDevice_ || !CloseDevice_ || !GetDeviceInfo_ || !SetPower_ ||
-            !SetFrequency_ || !GetFrequency_ || !GetDDC1Count_ || !GetDDCInfo_ ||
+            !SetFrequency_ || !GetFrequency_ ||
+            !SetFrontEndFrequency_ || !GetFrontEndFrequency_ ||
+            !SetDDC1Frequency_ || !GetDDC1Frequency_ ||
+            !GetDDC1Count_ || !GetDDCInfo_ ||
             !SetDDC1_ || !SetCallbacks_ || !StartDDC1_ || !StopDDC1_ || !SetAttenuator_)
             throw std::runtime_error("G39DDC: missing one or more required symbols in " G39_VENDOR_LIB);
     }
@@ -530,6 +619,10 @@ private:
     G39DDC_SET_POWER       SetPower_       = nullptr;
     G39DDC_SET_FREQUENCY   SetFrequency_   = nullptr;
     G39DDC_GET_FREQUENCY   GetFrequency_   = nullptr;
+    G39DDC_SET_FRONT_END_FREQUENCY SetFrontEndFrequency_ = nullptr;
+    G39DDC_GET_FRONT_END_FREQUENCY GetFrontEndFrequency_ = nullptr;
+    G39DDC_SET_DDC1_FREQUENCY      SetDDC1Frequency_      = nullptr;
+    G39DDC_GET_DDC1_FREQUENCY      GetDDC1Frequency_      = nullptr;
     G39DDC_GET_DDC1_COUNT  GetDDC1Count_   = nullptr;
     G39DDC_GET_DDC_INFO    GetDDCInfo_     = nullptr;
     G39DDC_SET_DDC1        SetDDC1_        = nullptr;
@@ -546,6 +639,11 @@ private:
     uint32_t numChannels_ = 0;
     double   freqMinHz_   = 0.0;
     double   freqMaxHz_   = 0.0;
+    double   frontEndWindowHz_ = 0.0;
+    double   frontEndStepHz_   = 1.0; // avoid div-by-zero if device ever reports 0
+    mutable std::mutex frontEndMtx_;
+    double   frontEndHz_   = 0.0;   // current actual shared front-end position
+    bool     frontEndValid_ = false; // has it been set at least once?
 
     std::vector<std::unique_ptr<G39ChannelState>> channels_;
     std::vector<std::vector<G39DDC_DDC_INFO>> ddc1Menu_;

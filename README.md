@@ -34,27 +34,39 @@ and apply the patches in `patches/` on top of it.
   - `dual_channel_independent_test.cpp` — tunes both RX channels to
     different frequencies/sample rates simultaneously and measures each
     independently.
+  - `calibrate_ddc1freq.c` — empirically determines the
+    `SetFrontEndFrequency`/`SetDDC1Frequency` offset convention by parking
+    the front end and sweeping the DDC1 offset against known real signal
+    peaks.
 
-## Known hardware limitation: shared front-end window
+## Shared front-end window (handled)
 
 The G39DDC has **one shared analog front-end downconverter** across both
 RX channels (`FrontEndWindowWidth` ≈ 16 MHz, `FrontEndFrequencyStep` =
 10 MHz on the unit this was tested against — read via `GetDeviceInfo`).
 The vendor's convenience `SetFrequency(channel, freq)` call repositions
-this shared front-end on every call, so when both channels are streaming
-simultaneously, whichever channel calls `SetFrequency` *last* effectively
-"steals" the shared front-end, leaving the other channel's reception
-incorrect even though its own `SetFrequency` call reports success.
+this shared front-end on every call, so naively calling it per-channel
+lets whichever channel retunes *last* silently steal the shared front-end
+out from under the other channel, even though that channel's own
+`SetFrequency` call still reports success.
 
-`SoapyG39DDC.cpp` currently calls the vendor's convenience function
-per-channel and does **not** yet implement front-end-window-aware
-tuning (i.e. using `SetFrontEndFrequency` + per-channel
-`SetDDC1Frequency` offsets to keep both channels correctly tuned within
-a shared window, or repositioning the window without clobbering the
-other channel's offset when both targets still fit within it). This is a
-real architectural fix, not yet implemented — true independent
-dual-channel reception at frequencies far enough apart currently does
-not work correctly. PRs welcome.
+`SoapyG39DDC.cpp` tracks the front-end's actual position itself and only
+moves it via `SetFrontEndFrequency` when a requested frequency genuinely
+doesn't fit the current window; within the window it tunes via the
+per-channel `SetDDC1Frequency` offset instead, which doesn't disturb the
+other channel at all (`test/calibrate_ddc1freq.c` is the standalone
+calibration program that empirically confirmed the offset convention:
+`actual_freq = front_end_hz + ddc1_offset`). Verified on real hardware
+with `test/dual_channel_independent_test.cpp`: both channels tuned to
+different frequencies and sample rates, streaming simultaneously, each
+independently showing the correct signal power at its own frequency.
+
+If the two channels' desired frequencies are farther apart than the
+window width, only one can be served correctly at a time — that's a
+genuine hardware limit, not something software can work around; the
+driver repositions the front end for the requesting channel and logs a
+warning that the other channel is now degraded, same as the vendor API
+would behave.
 
 ## Building
 
