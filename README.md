@@ -20,8 +20,9 @@ and apply the patches in `patches/` on top of it.
   and disables the unused/unportable PCI code path (this hardware is USB).
 - `soapy/SoapyG39DDC.cpp` — a `SoapySDR::Device` driver wrapping the
   vendor's `libg39ddcapi.so` via `dlopen`. Supports both RX channels,
-  per-channel sample rate (DDC1 mode selection), frequency, and step
-  attenuator gain. Builds as a standalone SoapySDR plugin module.
+  per-channel sample rate (DDC1 mode selection), frequency, and
+  band-aware gain (step attenuator below 50MHz, switched preamp above).
+  Builds as a standalone SoapySDR plugin module.
 - `udev/99-g39ddc.rules` — lets a normal user open `/dev/g39ddc*` and the
   raw USB device without root.
 - `test/` — standalone validation programs used to confirm this actually
@@ -38,6 +39,15 @@ and apply the patches in `patches/` on top of it.
     `SetFrontEndFrequency`/`SetDDC1Frequency` offset convention by parking
     the front end and sweeping the DDC1 offset against known real signal
     peaks.
+  - `calibrate_gain.c` — proves the per-channel `SetGain`/`SetAGC` API has
+    zero effect on DDC1's raw IQ output (it only affects the demodulator/
+    audio chain downstream of the IQ tap point).
+  - `calibrate_preamp.c` — proves `SetPreamplifier` (device-wide, ~10dB)
+    is the real VHF/UHF/SHF gain control, with a measured ~11dB power
+    swing at 99.5MHz.
+  - `gain_band_test.cpp` — exercises the SoapySDR driver's `setGain("ATT")`
+    end-to-end at both an HF and a VHF frequency, confirming the
+    band-aware dispatch below.
 
 ## Shared front-end window (handled)
 
@@ -67,6 +77,43 @@ genuine hardware limit, not something software can work around; the
 driver repositions the front end for the requesting channel and logs a
 warning that the other channel is now degraded, same as the vendor API
 would behave.
+
+## Gain control: two different controls in two different signal paths (handled)
+
+The vendor SDK's block diagram (per-channel chain: frequency shift → DDC1
+→ frequency shift → DDC2 → noise blanker → demod filter → notch → AGC/
+gain → demodulator → audio gain → audio filter) shows the per-channel
+`SetGain`/`SetAGC` API sits *after* DDC2, in the demodulator/audio chain
+only — it never touches DDC1's raw IQ output, which is the data this
+driver actually streams. Confirmed empirically in `test/calibrate_gain.c`:
+sweeping `SetGain` 0-60dB at a known strong VHF station produced no
+measurable change in IQ power.
+
+The two controls that *do* affect DDC1's raw output are both device-wide
+(not per-channel) and live in different parts of the analog front-end
+depending on band:
+
+- `SetAttenuator` (0-18dB, 6dB steps) — wired into the **HF path only**
+  (9kHz-50MHz on the tested unit).
+- `SetPreamplifier` (switched ~10dB boolean) — wired into the
+  **VHF/UHF/SHF path only** (50MHz-3.5GHz).
+
+`SoapyG39DDC.cpp` exposes a single `"ATT"` SoapySDR gain element per
+channel that dispatches to whichever control is actually wired into that
+channel's current frequency, using a 50MHz HF/VHF boundary check against
+the channel's last-tuned frequency:`getGainRange`, `setGain`, and
+`getGain` all do this check. Below 50MHz it drives `SetAttenuator`
+(0-18dB); at or above it drives `SetPreamplifier` (treating any
+requested gain ≥5dB as "preamp on"). Verified on real hardware with
+`test/gain_band_test.cpp`: ~11dB measured swing toggling `ATT` 0/10 at
+99.5MHz (preamp path), and a real ~10dB monotonic drop sweeping `ATT`
+0/6/12/18 at 7.2MHz (attenuator path) — neither was visible before this
+fix, since `SetAttenuator` alone (without the preamp dispatch) showed
+~0dB change at any VHF test frequency.
+
+Because both underlying controls are device-wide, setting gain on one
+channel also affects the other if they're both in the same band — same
+as the vendor API, not a limitation introduced by this driver.
 
 ## Building
 

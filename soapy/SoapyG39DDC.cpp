@@ -61,7 +61,6 @@ struct G39ChannelState
     uint32_t  bandwidth   = 0;
     double    frequency_hz = 100e6;
     bool      frequency_valid = false; // has setFrequency ever been called on this channel?
-    uint8_t   attenuator_step = 0; // 0..3 -> 0/6/12/18 dB
 
     std::mutex                          mtx;
     std::condition_variable             cv;
@@ -374,6 +373,26 @@ public:
     }
 
     // ---- gain (front-end step attenuator, 0/6/12/18 dB) ---------------------
+    // ---- gain ---------------------------------------------------------------
+    //
+    // The vendor SDK's block diagram (doc/g39ddc_sdk_blockdiagram.gif) shows
+    // SetGain/SetAGC wired in AFTER DDC2, in the demodulator/audio chain --
+    // they have NO effect on the raw DDC1 IQ stream this driver uses for RX
+    // streaming. Confirmed empirically: sweeping SetGain 0-60dB at a real
+    // station produced no measurable change in DDC1 output power.
+    //
+    // The two controls that DO affect DDC1's actual level are both in the
+    // analog front-end, and are frequency-band-dependent:
+    //   - SetAttenuator (0-18dB, 6dB steps): wired into the HF path
+    //     (9kHz-50MHz) only.
+    //   - SetPreamplifier (on/off, device-wide): a switched 10dB stage in
+    //     the VHF/UHF/SHF path (50MHz-3.5GHz) only. Confirmed empirically:
+    //     toggling it changed measured DDC1 power by ~11dB at 99.5 MHz.
+    // Below, the single "ATT" gain element dispatches to whichever of these
+    // is actually wired into the current channel's tuned frequency, so
+    // SoapySDR callers don't need band-specific knowledge.
+    static constexpr double kHfVhfBoundaryHz = 50e6;
+
     std::vector<std::string> listGains(const int direction, const size_t) const override
     {
         std::vector<std::string> g;
@@ -381,9 +400,12 @@ public:
         return g;
     }
 
-    SoapySDR::Range getGainRange(const int direction, const size_t, const std::string &) const override
+    SoapySDR::Range getGainRange(const int direction, const size_t channel, const std::string &) const override
     {
-        return (direction == SOAPY_SDR_RX) ? SoapySDR::Range(0.0, 18.0, 6.0) : SoapySDR::Range(0, 0);
+        if (direction != SOAPY_SDR_RX) return SoapySDR::Range(0, 0);
+        checkChannel(channel);
+        bool hf = channels_[channel]->frequency_hz < kHfVhfBoundaryHz;
+        return hf ? SoapySDR::Range(0.0, 18.0, 6.0) : SoapySDR::Range(0.0, 10.0, 10.0);
     }
 
     void setGain(const int direction, const size_t channel, const std::string &name,
@@ -391,18 +413,30 @@ public:
     {
         if (direction != SOAPY_SDR_RX || name != "ATT") return;
         checkChannel(channel);
-        double clamped = std::min(18.0, std::max(0.0, value));
-        int step = static_cast<int>(std::round(clamped / 6.0));
-        if (!SetAttenuator_(hDevice_, static_cast<uint32_t>(step)))
-            throw std::runtime_error("G39DDC SetAttenuator failed");
-        channels_[channel]->attenuator_step = static_cast<uint8_t>(step);
+        bool hf = channels_[channel]->frequency_hz < kHfVhfBoundaryHz;
+        if (hf)
+        {
+            double clamped = std::min(18.0, std::max(0.0, value));
+            int step = static_cast<int>(std::round(clamped / 6.0));
+            if (!SetAttenuator_(hDevice_, static_cast<uint32_t>(step)))
+                throw std::runtime_error("G39DDC SetAttenuator failed");
+            attenuatorStep_ = static_cast<uint8_t>(step);
+        }
+        else
+        {
+            bool on = value >= 5.0;
+            if (!SetPreamplifier_(hDevice_, on ? 1 : 0))
+                throw std::runtime_error("G39DDC SetPreamplifier failed");
+            preampOn_ = on;
+        }
     }
 
     double getGain(const int direction, const size_t channel, const std::string &name) const override
     {
         if (direction != SOAPY_SDR_RX || name != "ATT") return 0.0;
         checkChannel(channel);
-        return channels_[channel]->attenuator_step * 6.0;
+        bool hf = channels_[channel]->frequency_hz < kHfVhfBoundaryHz;
+        return hf ? attenuatorStep_ * 6.0 : (preampOn_ ? 10.0 : 0.0);
     }
 
     // ---- streaming -----------------------------------------------------------
@@ -602,13 +636,16 @@ private:
         StartDDC1_      = reinterpret_cast<G39DDC_START_DDC1>(dlsym(api_, "StartDDC1"));
         StopDDC1_       = reinterpret_cast<G39DDC_STOP_DDC1>(dlsym(api_, "StopDDC1"));
         SetAttenuator_  = reinterpret_cast<G39DDC_SET_ATTENUATOR>(dlsym(api_, "SetAttenuator"));
+        SetPreamplifier_ = reinterpret_cast<G39DDC_SET_PREAMPLIFIER>(dlsym(api_, "SetPreamplifier"));
+        GetPreamplifier_ = reinterpret_cast<G39DDC_GET_PREAMPLIFIER>(dlsym(api_, "GetPreamplifier"));
 
         if (!OpenDevice_ || !CloseDevice_ || !GetDeviceInfo_ || !SetPower_ ||
             !SetFrequency_ || !GetFrequency_ ||
             !SetFrontEndFrequency_ || !GetFrontEndFrequency_ ||
             !SetDDC1Frequency_ || !GetDDC1Frequency_ ||
             !GetDDC1Count_ || !GetDDCInfo_ ||
-            !SetDDC1_ || !SetCallbacks_ || !StartDDC1_ || !StopDDC1_ || !SetAttenuator_)
+            !SetDDC1_ || !SetCallbacks_ || !StartDDC1_ || !StopDDC1_ || !SetAttenuator_ ||
+            !SetPreamplifier_ || !GetPreamplifier_)
             throw std::runtime_error("G39DDC: missing one or more required symbols in " G39_VENDOR_LIB);
     }
 
@@ -630,6 +667,8 @@ private:
     G39DDC_START_DDC1      StartDDC1_      = nullptr;
     G39DDC_STOP_DDC1       StopDDC1_       = nullptr;
     G39DDC_SET_ATTENUATOR  SetAttenuator_  = nullptr;
+    G39DDC_SET_PREAMPLIFIER SetPreamplifier_ = nullptr;
+    G39DDC_GET_PREAMPLIFIER GetPreamplifier_ = nullptr;
 
     int32_t  hDevice_     = -1;
     bool     powered_     = false;
@@ -644,6 +683,12 @@ private:
     mutable std::mutex frontEndMtx_;
     double   frontEndHz_   = 0.0;   // current actual shared front-end position
     bool     frontEndValid_ = false; // has it been set at least once?
+
+    // SetAttenuator/SetPreamplifier are device-wide (no channel param) in the
+    // vendor API, mirroring the hardware: one shared HF attenuator and one
+    // shared VHF/UHF/SHF preamp, not per-DDC-channel controls.
+    uint8_t  attenuatorStep_ = 0;
+    bool     preampOn_       = false;
 
     std::vector<std::unique_ptr<G39ChannelState>> channels_;
     std::vector<std::vector<G39DDC_DDC_INFO>> ddc1Menu_;
