@@ -14,7 +14,7 @@ $(TARGET): SoapyG39DDC.cpp
 	$(CXX) $(CXXFLAGS) $< -o $@ $(LDFLAGS)
 
 install: $(TARGET)
-	install -m 755 $(TARGET) $(MODULE_DIR)/$(TARGET)
+	install -D -m 755 $(TARGET) $(MODULE_DIR)/$(TARGET)
 	ldconfig
 
 clean:

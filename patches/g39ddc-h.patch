@@ -1,5 +1,5 @@
---- /tmp/orig-extract/g39ddc-1.11/driver/g39ddc.h	2018-06-06 07:24:59.000000000 -0400
-+++ /home/brendan/winradio_devpack/g39ddc-1.11/driver/g39ddc.h	2026-06-20 15:54:22.284364526 -0400
+--- a/driver/g39ddc.h	2026-06-21 20:51:32.100001066 -0400
++++ b/driver/g39ddc.h	2026-06-21 20:51:32.104001095 -0400
 @@ -14,7 +14,7 @@
  #endif
  

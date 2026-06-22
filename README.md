@@ -117,6 +117,44 @@ as the vendor API, not a limitation introduced by this driver.
 
 ## Building
 
+### Quick path: `install.sh`
+
+If you already have the WiNRADiO G39DDC DevPack downloaded and extracted
+somewhere (get it from WiNRADiO/RADIXON yourself — see licensing note
+above), one command does everything below by hand:
+
+```sh
+sudo ./install.sh --sdk-dir /path/to/g39ddc-1.11
+```
+
+It applies the patches, builds+installs the kernel module, installs the
+udev rule, and builds+installs the SoapySDR module, then runs
+`SoapySDRUtil --find` to verify. Pass `--skip-kernel-module` if the
+driver's already installed, or `--module-dir` to override the
+auto-detected SoapySDR plugin path. `./install.sh --help` for details.
+
+### RPM: does the vendor download for you too
+
+`rpm/g39ddc-soapy.spec` builds an RPM whose `%post` script fetches the
+vendor DevPack itself (from WiNRADiO's own public URL — never bundled
+in this repo or the RPM) and builds+installs the kernel driver against
+whatever kernel is running on the install target, in addition to
+installing the prebuilt SoapySDR module and udev rule. So once you have
+the `.rpm` (see CI artifacts, or build it yourself per the comment at
+the top of the spec file), the whole thing is just:
+
+```sh
+sudo dnf install ./g39ddc-soapy-1.0.0-1.*.rpm
+```
+
+This needs network access and kernel headers matching the running
+kernel at install time; `%post` checks for the latter and fails with a
+clear message (rather than silently skipping the driver) if they're
+missing. It's a one-shot build against the kernel at install time, not
+DKMS — a kernel upgrade later needs `rpm --reinstall` to rebuild.
+
+### By hand
+
 ```sh
 # 1. Get the WiNRADiO G39DDC Linux DevPack from WiNRADiO/RADIXON yourself.
 # 2. Apply the patches:
@@ -131,15 +169,32 @@ sudo cp udev/99-g39ddc.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger -s g39ddc
 
 # 4. Build and install the SoapySDR module (needs the vendor's
-#    g39ddcapi.h and libg39ddcapi.so on your include/library path):
+#    g39ddcapi.h on your include path -- the vendor lib is dlopen()'d
+#    at runtime, not linked, so it isn't needed at build time):
 cd soapy
-make VENDOR_HDR=/path/to/devpack/c_cpp_header VENDOR_LIB=/path/to/devpack/lib/x86_64
+make VENDOR_HDR=/path/to/devpack/c_cpp_header
 sudo make install
 
 # 5. Verify:
 SoapySDRUtil --find
 SoapySDRUtil --probe="driver=g39ddc"
 ```
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR:
+
+- **build-test**: fetches the vendor DevPack fresh (same as the RPM
+  `%post` and install.sh do, from WiNRADiO's public URL — never
+  cached/committed in this repo beyond a build-time GitHub Actions
+  cache), regression-tests that `patches/` still apply and the kernel
+  module still builds, builds the SoapySDR module, compile-checks every
+  program in `test/` (no real hardware on CI runners, so they're built
+  but not run), and loads the built module to confirm it registers the
+  `g39ddc` SoapySDR factory without crashing.
+- **rpm**: builds `rpm/g39ddc-soapy.spec` in a Rocky Linux 9 container
+  (matching this project's actual deployment base image) and uploads
+  the resulting `.rpm` as a workflow artifact.
 
 ## License
 

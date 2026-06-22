@@ -1,5 +1,5 @@
---- /tmp/orig-extract/g39ddc-1.11/driver/Makefile	2018-06-06 07:24:59.000000000 -0400
-+++ /home/brendan/winradio_devpack/g39ddc-1.11/driver/Makefile	2026-06-20 15:53:58.693210209 -0400
+--- a/driver/Makefile	2026-06-21 20:51:32.101001072 -0400
++++ b/driver/Makefile	2026-06-21 20:51:32.106026571 -0400
 @@ -2,6 +2,10 @@
  obj-m := g39ddc.o
  KERNELDIR ?= /lib/modules/$(shell uname -r)/build
