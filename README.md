@@ -1,5 +1,8 @@
 # WiNRADiO G39DDC — Linux kernel driver patches + SoapySDR driver
 
+[![CI](https://github.com/BMichaud7/winradio-g39ddc/actions/workflows/ci.yml/badge.svg)](https://github.com/BMichaud7/winradio-g39ddc/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/BMichaud7/winradio-g39ddc)](https://github.com/BMichaud7/winradio-g39ddc/releases/latest)
+
 A SoapySDR driver and modern-kernel compatibility patches for the
 [WiNRADiO G39DDC EXCELSIOR](https://www.winradio.com/) receiver family
 (tested against a real G39DDCe, USB vendor:product `14e0:1109`).
@@ -133,37 +136,32 @@ udev rule, and builds+installs the SoapySDR module, then runs
 driver's already installed, or `--module-dir` to override the
 auto-detected SoapySDR plugin path. `./install.sh --help` for details.
 
-### RPM: download a prebuilt release
+### RPM: one command, does the vendor download for you too
 
 Every tagged release publishes prebuilt `x86_64` and `aarch64` RPMs as
-real GitHub Release assets (not just CI workflow artifacts, which need
-a logged-in GitHub session and expire) — grab one directly:
+real GitHub Release assets (permanent, public, no GitHub login needed —
+not CI workflow artifacts, which require auth and expire after 90 days).
+Grab the one matching `uname -m` from the
+[latest release](https://github.com/BMichaud7/winradio-g39ddc/releases/latest)
+and:
 
 ```sh
-# pick the .rpm matching `uname -m` from:
-# https://github.com/BMichaud7/winradio-g39ddc/releases/latest
 sudo dnf install ./g39ddc-soapy-1.0.0-1.el9.x86_64.rpm   # or the aarch64 one
 ```
 
-### RPM: does the vendor download for you too
-
-`rpm/g39ddc-soapy.spec` builds an RPM whose `%post` script fetches the
-vendor DevPack itself (from WiNRADiO's own public URL — never bundled
-in this repo or the RPM) and builds+installs the kernel driver against
-whatever kernel is running on the install target, in addition to
-installing the prebuilt SoapySDR module and udev rule. So once you have
-the `.rpm` (see CI artifacts, or build it yourself per the comment at
-the top of the spec file), the whole thing is just:
-
-```sh
-sudo dnf install ./g39ddc-soapy-1.0.0-1.*.rpm
-```
+That's the whole install. The RPM's `%post` script fetches the vendor
+DevPack itself (from WiNRADiO's own public URL — never bundled in this
+repo or the RPM) and builds+installs the kernel driver against whatever
+kernel is running on the install target, in addition to the prebuilt
+SoapySDR module and udev rule it ships directly.
 
 This needs network access and kernel headers matching the running
 kernel at install time; `%post` checks for the latter and fails with a
 clear message (rather than silently skipping the driver) if they're
 missing. It's a one-shot build against the kernel at install time, not
-DKMS — a kernel upgrade later needs `rpm --reinstall` to rebuild.
+DKMS — a kernel upgrade later needs `rpm --reinstall` to rebuild. To
+build the RPM yourself instead of using a release, see the comment at
+the top of `rpm/g39ddc-soapy.spec`.
 
 ### By hand
 
@@ -205,8 +203,13 @@ SoapySDRUtil --probe="driver=g39ddc"
   but not run), and loads the built module to confirm it registers the
   `g39ddc` SoapySDR factory without crashing.
 - **rpm**: builds `rpm/g39ddc-soapy.spec` in a Rocky Linux 9 container
-  (matching this project's actual deployment base image) and uploads
-  the resulting `.rpm` as a workflow artifact.
+  (matching this project's actual deployment base image), as a matrix
+  over `x86_64` (`ubuntu-latest`) and `aarch64` (`ubuntu-24.04-arm`,
+  GitHub's native ARM64 hosted runner), and uploads each `.rpm` as a
+  workflow artifact.
+- **release** (tagged pushes only, e.g. `v1.0.0`): takes both RPMs from
+  the matrix and publishes them as real GitHub Release assets — see
+  the RPM section above.
 
 ## License
 
