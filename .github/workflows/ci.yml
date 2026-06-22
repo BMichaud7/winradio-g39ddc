@@ -62,7 +62,7 @@ jobs:
             g++ -std=c++17 -Wall -c "$f" -o "/tmp/$(basename "$f").o"
           done
 
-      - name: Module load smoke test (expect 0 devices found, not a crash)
+      - name: Module load smoke test (no hardware on CI -- just confirm it registers, doesn't crash)
         run: |
           module_dir=$(SoapySDRUtil --info 2>/dev/null \
             | grep 'Search path:' \
@@ -72,7 +72,11 @@ jobs:
           sudo mkdir -p "$module_dir"
           sudo cp soapy/libG39DDCSupport.so "$module_dir/"
           sudo ldconfig
-          SoapySDRUtil --find
+          # --find exits non-zero when it finds zero devices, which is the
+          # expected (only possible) outcome on a CI runner with no real
+          # hardware -- assert on factory registration instead.
+          SoapySDRUtil --info | tee /tmp/soapy-info.txt || true
+          grep -q "^Available factories\.\.\..*\bg39ddc\b" /tmp/soapy-info.txt
 
   rpm:
     runs-on: ubuntu-latest
