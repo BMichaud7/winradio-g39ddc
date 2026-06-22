@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 env:
   VENDOR_TARBALL_URL: https://linradio.com/software/g39ddc-1.11.tar.gz
 
@@ -79,7 +82,14 @@ jobs:
           grep -q "^Available factories\.\.\..*\bg39ddc\b" /tmp/soapy-info.txt
 
   rpm:
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container: rockylinux:9
     steps:
       - name: Install git + RPM build dependencies (container has neither)
@@ -102,5 +112,22 @@ jobs:
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: g39ddc-soapy-rpm
+          name: g39ddc-soapy-rpm-${{ matrix.arch }}
           path: ~/rpmbuild/RPMS/**/*.rpm
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-test, rpm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: g39ddc-soapy-rpm-*
+          path: rpms
+          merge-multiple: true
+
+      - name: Publish GitHub Release with both RPMs attached
+        uses: softprops/action-gh-release@v2
+        with:
+          files: rpms/**/*.rpm
+          generate_release_notes: true

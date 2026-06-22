@@ -133,6 +133,18 @@ udev rule, and builds+installs the SoapySDR module, then runs
 driver's already installed, or `--module-dir` to override the
 auto-detected SoapySDR plugin path. `./install.sh --help` for details.
 
+### RPM: download a prebuilt release
+
+Every tagged release publishes prebuilt `x86_64` and `aarch64` RPMs as
+real GitHub Release assets (not just CI workflow artifacts, which need
+a logged-in GitHub session and expire) — grab one directly:
+
+```sh
+# pick the .rpm matching `uname -m` from:
+# https://github.com/BMichaud7/winradio-g39ddc/releases/latest
+sudo dnf install ./g39ddc-soapy-1.0.0-1.el9.x86_64.rpm   # or the aarch64 one
+```
+
 ### RPM: does the vendor download for you too
 
 `rpm/g39ddc-soapy.spec` builds an RPM whose `%post` script fetches the
